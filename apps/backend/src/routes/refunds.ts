@@ -8,6 +8,11 @@
  * code REFUND_ALREADY_CLAIMED on the second call — unless the first on-chain
  * attempt failed, in which case the refund is retried.
  *
+ * Retries are bounded (issue #329): a refund that keeps failing on-chain is
+ * only auto-retried up to MAX_REFUND_RETRIES times. Once the budget is spent
+ * the endpoint stops attempting the on-chain call and returns 409 with code
+ * REFUND_NEEDS_MANUAL_INTERVENTION, a terminal state requiring an operator.
+ *
  * Request body:
  *   {
  *     "refundId":       "string — unique idempotency key",
@@ -22,7 +27,8 @@
  *
  * Responses: 201 with `claim.status = "submitted"` and `claim.txHash`;
  * 502 REFUND_EXECUTION_FAILED if the chain rejected it;
- * 503 REFUND_EXECUTION_UNAVAILABLE if Trustless Work isn't configured.
+ * 503 REFUND_EXECUTION_UNAVAILABLE if Trustless Work isn't configured;
+ * 409 REFUND_NEEDS_MANUAL_INTERVENTION once the retry budget is exhausted.
  *
  * GET /api/refunds/claim/:refundId
  *
@@ -36,6 +42,12 @@ import { AppError } from "../middleware/errorHandler";
 import { alertService } from "../services/alert.service";
 
 export const refundsRouter = Router();
+
+/**
+ * Maximum number of on-chain attempts (initial + retries) for a single
+ * refundId before the refund is parked in a terminal state (issue #329).
+ */
+export const MAX_REFUND_ATTEMPTS = 5;
 
 const claimSchema = z.object({
   refundId: z.string().min(1, "refundId is required"),
@@ -70,6 +82,22 @@ refundsRouter.post("/claim", async (req: Request, res: Response, next: NextFunct
       const existing = await refundService.getClaimStatus(parsed.data.refundId);
       return res.status(409).json({
         error: { code: err.code, message: err.message },
+        claim: existing ?? null,
+      });
+    }
+
+    // Retry budget exhausted (issue #329): the refund has failed on-chain too
+    // many times. Stop attempting the on-chain call and surface a terminal
+    // state that requires manual intervention.
+    if (err instanceof AppError && err.code === "REFUND_RETRY_LIMIT_EXCEEDED") {
+      const existing = await refundService.getClaimStatus(parsed.data.refundId);
+      return res.status(409).json({
+        error: {
+          code: "REFUND_NEEDS_MANUAL_INTERVENTION",
+          message:
+            `Refund ${parsed.data.refundId} failed on-chain ${MAX_REFUND_ATTEMPTS} times ` +
+            "and will not be retried automatically. Manual intervention is required.",
+        },
         claim: existing ?? null,
       });
     }
