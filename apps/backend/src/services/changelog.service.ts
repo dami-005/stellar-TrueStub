@@ -171,6 +171,40 @@ export class ChangelogService {
   }
 
   /**
+   * Records a dispute state transition as a write-once changelog entry.
+   *
+   * Convenience wrapper around `appendEntry` used by the dispute service so
+   * that every dispute transition (resolve / withdraw / escalate) produces a
+   * corresponding audit-log entry.  The entry is keyed by the dispute id and
+   * transition so repeated transitions remain distinct, and the transition
+   * details are captured in `metadata`.
+   */
+  async recordDisputeTransition(payload: {
+    disputeId: string;
+    transition: string;
+    actorId: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<ChangelogEntry> {
+    const { disputeId, transition, actorId } = payload;
+
+    if (!disputeId || !transition || !actorId) {
+      throw new AppError(
+        400,
+        CHANGELOG_ERROR_CODES.INVALID_PAYLOAD,
+        "disputeId, transition, and actorId are required"
+      );
+    }
+
+    return this.appendEntry({
+      entryId: `dispute:${disputeId}:${transition}:${Date.now()}`,
+      action: `dispute_${transition}`,
+      actorId,
+      resourceId: disputeId,
+      metadata: { disputeId, transition, ...payload.metadata },
+    });
+  }
+
+  /**
    * UPDATE IS FORBIDDEN — always throws CHANGELOG_UPDATE_FORBIDDEN.
    *
    * This method exists to provide an explicit, documented error rather than

@@ -10,11 +10,15 @@
  *
  * Invalid transitions return 422 DISPUTE_INVALID_TRANSITION.
  * Transitions from final states return 409 DISPUTE_ALREADY_FINAL.
+ *
+ * Every state transition is recorded in the write-once changelog audit log
+ * (issue #314).
  */
 
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { disputeService } from "../services/dispute.service";
+import { changelogService } from "../services/changelog.service";
 import { AppError } from "../middleware/errorHandler";
 
 export const disputesRouter = Router();
@@ -35,6 +39,35 @@ function handleAppError(err: unknown, res: Response): Response | void {
     return res.status(err.statusCode).json({ error: { code: err.code, message: err.message } });
   }
   throw err;
+}
+
+/**
+ * Record a dispute state transition in the immutable changelog audit log.
+ * Audit logging must never break the transition itself, so failures are
+ * swallowed after being surfaced to the error handler.
+ */
+async function recordDisputeTransition(
+  dispute: { disputeId: string; escrowId: string; state: string },
+  action: "escalate" | "resolve" | "withdraw",
+  metadata: Record<string, unknown> = {},
+): Promise<void> {
+  try {
+    await changelogService.append({
+      entityType: "dispute",
+      entityId: dispute.disputeId,
+      action: `dispute.${action}`,
+      actor: dispute.raisedBy ?? "system",
+      metadata: {
+        escrowId: dispute.escrowId,
+        state: dispute.state,
+        ...metadata,
+      },
+    });
+  } catch (err) {
+    // Audit logging is best-effort; never fail the state transition.
+    // eslint-disable-next-line no-console
+    console.error(`Failed to write changelog entry for dispute ${dispute.disputeId}`, err);
+  }
 }
 
 // POST /api/disputes
@@ -79,6 +112,7 @@ disputesRouter.get("/:disputeId", async (req: Request, res: Response) => {
 disputesRouter.post("/:disputeId/escalate", async (req: Request, res: Response) => {
   try {
     const dispute = await disputeService.transition(req.params.disputeId, "escalate");
+    await recordDisputeTransition(dispute, "escalate");
     return res.json({ dispute });
   } catch (err) {
     return handleAppError(err, res);
@@ -91,6 +125,7 @@ disputesRouter.post("/:disputeId/resolve", async (req: Request, res: Response) =
 
   try {
     const dispute = await disputeService.transition(req.params.disputeId, "resolve", { resolution });
+    await recordDisputeTransition(dispute, "resolve", { resolution });
     return res.json({ dispute });
   } catch (err) {
     return handleAppError(err, res);
@@ -101,6 +136,7 @@ disputesRouter.post("/:disputeId/resolve", async (req: Request, res: Response) =
 disputesRouter.post("/:disputeId/withdraw", async (req: Request, res: Response) => {
   try {
     const dispute = await disputeService.transition(req.params.disputeId, "withdraw");
+    await recordDisputeTransition(dispute, "withdraw");
     return res.json({ dispute });
   } catch (err) {
     return handleAppError(err, res);

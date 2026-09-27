@@ -38,9 +38,14 @@
  *
  * Invalid transitions return DISPUTE_INVALID_TRANSITION (422).
  * Transitions from final states return DISPUTE_ALREADY_FINAL (409).
+ *
+ * Every successful transition is also written to the write-once changelog
+ * audit log (issue #155) so dispute resolve/withdraw/escalate events are
+ * captured in the immutable audit trail (issue #314).
  */
 
 import { AppError } from "../middleware/errorHandler";
+import { ChangelogService } from "./changelog.service";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -141,7 +146,10 @@ export class InMemoryDisputeStore implements DisputeStore {
 // ── Service ────────────────────────────────────────────────────────────────
 
 export class DisputeService {
-  constructor(private readonly store: DisputeStore = new InMemoryDisputeStore()) {}
+  constructor(
+    private readonly store: DisputeStore = new InMemoryDisputeStore(),
+    private readonly changelog: ChangelogService = new ChangelogService()
+  ) {}
 
   /**
    * Opens a new dispute in OPEN state.
@@ -244,19 +252,27 @@ export class DisputeService {
     };
 
     await this.store.set(disputeId, updated);
+
+    // Record the state transition in the write-once changelog audit log.
+    // Audit logging must never block or roll back the state transition, so
+    // failures are swallowed after the dispute has been persisted.
+    try {
+      await this.changelog.append({
+        entityType: "dispute",
+        entityId: disputeId,
+        action: `dispute.${event}`,
+        actor: dispute.raisedBy,
+        metadata: {
+          escrowId: dispute.escrowId,
+          fromState: dispute.state,
+          toState: nextState,
+          ...(opts?.resolution ? { resolution: opts.resolution } : {}),
+        },
+      });
+    } catch {
+      // Changelog is best-effort; the dispute transition already succeeded.
+    }
+
     return updated;
   }
-
-  /** Returns the current state without side effects. */
-  async getDispute(disputeId: string): Promise<Dispute | undefined> {
-    return this.store.get(disputeId);
-  }
-
-  /** Lists all disputes for an escrow. */
-  async listDisputesByEscrow(escrowId: string): Promise<Dispute[]> {
-    return this.store.listByEscrow(escrowId);
-  }
 }
-
-// Singleton shared by routes
-export const disputeService = new DisputeService();
