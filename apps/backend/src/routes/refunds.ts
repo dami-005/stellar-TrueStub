@@ -8,6 +8,12 @@
  * code REFUND_ALREADY_CLAIMED on the second call — unless the first on-chain
  * attempt failed, in which case the refund is retried.
  *
+ * The idempotency guard is scoped to the (`refundId`, `escrowId`) pair, not
+ * `refundId` alone (issue #315). A `refundId` that is reused across two
+ * different escrows (e.g. a client bug) is therefore rejected with 409
+ * REFUND_ID_REUSED_ACROSS_ESCROWS instead of being silently cross-applied to
+ * the wrong escrow's dispute.
+ *
  * Request body:
  *   {
  *     "refundId":       "string — unique idempotency key",
@@ -21,6 +27,9 @@
  *   }
  *
  * Responses: 201 with `claim.status = "submitted"` and `claim.txHash`;
+ * 409 REFUND_ALREADY_CLAIMED for a second identical call against the same
+ * escrow; 409 REFUND_ID_REUSED_ACROSS_ESCROWS when the same `refundId` is
+ * reused against a different escrow;
  * 502 REFUND_EXECUTION_FAILED if the chain rejected it;
  * 503 REFUND_EXECUTION_UNAVAILABLE if Trustless Work isn't configured.
  *
@@ -70,6 +79,15 @@ refundsRouter.post("/claim", async (req: Request, res: Response, next: NextFunct
       return res.status(409).json({
         error: { code: err.code, message: err.message },
         claim: existing ?? null,
+      });
+    }
+    if (err instanceof AppError && err.code === "REFUND_ID_REUSED_ACROSS_ESCROWS") {
+      // The same refundId was already claimed against a different escrow.
+      // Do NOT return the other escrow's claim — that would leak/cross-apply
+      // a refund record to the wrong escrow (issue #315).
+      return res.status(409).json({
+        error: { code: err.code, message: err.message },
+        claim: null,
       });
     }
     // Express 4 doesn't catch async throws — hand off to the global errorHandler
