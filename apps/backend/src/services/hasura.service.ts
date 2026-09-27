@@ -8,6 +8,10 @@ interface NotificationMutationData {
   insert_notifications_one?: { id?: string } | null;
 }
 
+interface OwnershipTransferMutationData {
+  update_ownership_transfers?: { affected_rows?: number };
+}
+
 export class HasuraService {
   /**
    * The single authoritative write path for `escrow_transactions.status`
@@ -43,6 +47,44 @@ export class HasuraService {
       throw new Error("Failed to update escrow status in Hasura");
     }
     return { affected_rows: data.update_escrow_transactions?.affected_rows ?? 0 };
+  }
+
+  /**
+   * Persists the ownership record for a transfer. This is the database half of
+   * the atomic ownership transfer (issue #154): the on-chain action and this
+   * write are coordinated by `ownership-transfer.service.ts`, which compensates
+   * (rolls back) the on-chain side if this write fails, and vice versa.
+   *
+   * Failures are surfaced (not swallowed) so the caller can run its
+   * compensation path instead of leaving a half-applied transfer behind.
+   */
+  static async updateOwnershipTransfer(
+    transferId: string,
+    ownerId: string
+  ): Promise<{ affected_rows: number }> {
+    const query = `
+      mutation UpdateOwnershipTransfer($transferId: uuid!, $ownerId: String!) {
+        update_ownership_transfers(
+          where: { id: { _eq: $transferId } }
+          _set: { owner_id: $ownerId, updated_at: "now()" }
+        ) {
+          affected_rows
+        }
+      }
+    `;
+
+    let data: OwnershipTransferMutationData;
+    try {
+      data = await hasuraClient.request<OwnershipTransferMutationData>(query, {
+        transferId,
+        ownerId,
+      });
+    } catch {
+      throw new Error("Failed to update ownership transfer in Hasura");
+    }
+    return {
+      affected_rows: data.update_ownership_transfers?.affected_rows ?? 0,
+    };
   }
 
   static async insertNotification(notification: {

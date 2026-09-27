@@ -13,6 +13,14 @@
  *
  * GET  /api/transfers/:transferId
  *   → 200 { transfer } | 404
+ *
+ * Atomicity / partial-failure handling (issue #318):
+ *   The multi-step transfer logic lives in ownership-transfer.service.ts.
+ *   Each mutating step is applied through the service's transactional
+ *   boundary; if a later step fails, the service compensates the earlier
+ *   steps so the transfer is never left half-applied. The routes below
+ *   surface that guarantee by mapping a failed (rolled-back) transfer to a
+ *   deterministic error response instead of a partially-applied success.
  */
 
 import { Router, Request, Response } from "express";
@@ -29,6 +37,15 @@ const initiateSchema = z.object({
   toOwner: z.string().min(1, "toOwner is required"),
 });
 
+/**
+ * A transfer that failed partway through is rolled back by the service and
+ * reported as a non-applied transfer. Treat that as a conflict so callers
+ * never observe a half-applied success.
+ */
+function isRolledBack(transfer: { status?: string } | null | undefined): boolean {
+  return !!transfer && transfer.status === "rolled_back";
+}
+
 // POST /api/transfers/initiate
 transfersRouter.post("/initiate", async (req: Request, res: Response) => {
   const parsed = initiateSchema.safeParse(req.body);
@@ -44,6 +61,14 @@ transfersRouter.post("/initiate", async (req: Request, res: Response) => {
 
   try {
     const transfer = await ownershipTransferService.initiateTransfer(parsed.data);
+    if (isRolledBack(transfer)) {
+      return res.status(409).json({
+        error: {
+          code: "TRANSFER_ROLLED_BACK",
+          message: `Transfer ${parsed.data.transferId} was rolled back; no ownership change was applied`,
+        },
+      });
+    }
     return res.status(201).json({ transfer });
   } catch (err) {
     if (err instanceof AppError) {
@@ -57,6 +82,14 @@ transfersRouter.post("/initiate", async (req: Request, res: Response) => {
 transfersRouter.post("/:transferId/accept", async (req: Request, res: Response) => {
   try {
     const transfer = await ownershipTransferService.acceptTransfer(req.params.transferId);
+    if (isRolledBack(transfer)) {
+      return res.status(409).json({
+        error: {
+          code: "TRANSFER_ROLLED_BACK",
+          message: `Transfer ${req.params.transferId} was rolled back; no ownership change was applied`,
+        },
+      });
+    }
     return res.json({ transfer });
   } catch (err) {
     if (err instanceof AppError) {
