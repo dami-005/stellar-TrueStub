@@ -19,6 +19,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { ownershipTransferService } from "../services/ownership-transfer.service";
 import { AppError } from "../middleware/errorHandler";
+import { sendCriticalAlert } from "../services/critical-alert.service";
 
 export const transfersRouter = Router();
 
@@ -49,6 +50,13 @@ transfersRouter.post("/initiate", async (req: Request, res: Response) => {
     if (err instanceof AppError) {
       return res.status(err.statusCode).json({ error: { code: err.code, message: err.message } });
     }
+    await sendCriticalAlert({
+      kind: "transfer_failure",
+      operation: "initiate",
+      transferId: parsed.data.transferId,
+      escrowId: parsed.data.escrowId,
+      error: err,
+    });
     throw err;
   }
 });
@@ -62,6 +70,12 @@ transfersRouter.post("/:transferId/accept", async (req: Request, res: Response) 
     if (err instanceof AppError) {
       return res.status(err.statusCode).json({ error: { code: err.code, message: err.message } });
     }
+    await sendCriticalAlert({
+      kind: "transfer_failure",
+      operation: "accept",
+      transferId: req.params.transferId,
+      error: err,
+    });
     throw err;
   }
 });
@@ -75,6 +89,12 @@ transfersRouter.post("/:transferId/cancel", async (req: Request, res: Response) 
     if (err instanceof AppError) {
       return res.status(err.statusCode).json({ error: { code: err.code, message: err.message } });
     }
+    await sendCriticalAlert({
+      kind: "transfer_failure",
+      operation: "cancel",
+      transferId: req.params.transferId,
+      error: err,
+    });
     throw err;
   }
 });

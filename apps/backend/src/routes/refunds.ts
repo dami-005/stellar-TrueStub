@@ -33,6 +33,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { refundService } from "../services/refund.service";
 import { AppError } from "../middleware/errorHandler";
+import { alertService } from "../services/alert.service";
 
 export const refundsRouter = Router();
 
@@ -72,6 +73,24 @@ refundsRouter.post("/claim", async (req: Request, res: Response, next: NextFunct
         claim: existing ?? null,
       });
     }
+
+    // A failed refund means someone is currently out money — raise a dedicated,
+    // higher-urgency alert (issue #328) distinct from the general Sentry stream.
+    await alertService.raiseCriticalAlert({
+      kind: "refund_failure",
+      summary: `Refund execution failed for refundId=${parsed.data.refundId}`,
+      details: {
+        refundId: parsed.data.refundId,
+        escrowId: parsed.data.escrowId,
+        refundTo: parsed.data.refundTo,
+        amount: parsed.data.amount,
+        currency: parsed.data.currency,
+        claimedBy: parsed.data.claimedBy,
+        errorCode: err instanceof AppError ? err.code : undefined,
+        errorMessage: err instanceof Error ? err.message : String(err),
+      },
+    });
+
     // Express 4 doesn't catch async throws — hand off to the global errorHandler
     // (maps REFUND_EXECUTION_FAILED → 502, REFUND_EXECUTION_UNAVAILABLE → 503).
     return next(err);
