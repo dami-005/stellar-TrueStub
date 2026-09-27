@@ -29,6 +29,13 @@ export interface ResolveDisputeInput {
   contractId: string;
   escrowType: EscrowType;
   distributions: Distribution[];
+  /**
+   * The escrow's funding asset (e.g. USDC, XLM, EURC). Trustless Work refunds
+   * in the escrow's original token, so the caller must pass the escrow's actual
+   * asset rather than relying on a single default left over from before
+   * multi-asset support existed (#322).
+   */
+  asset: string;
   /** Required for multi-release escrows. */
   milestoneIndex?: string;
 }
@@ -102,7 +109,7 @@ export function createTrustlessWorkClient(): TrustlessWorkClient {
   }
 
   return {
-    async resolveDispute({ contractId, escrowType, distributions, milestoneIndex }) {
+    async resolveDispute({ contractId, escrowType, distributions, asset, milestoneIndex }) {
       const { apiUrl, apiKey, signer, networkPassphrase } = requireTrustlessWorkConfig();
 
       const endpoint = escrowType === "single-release" ? "resolve-dispute" : "resolve-milestone-dispute";
@@ -110,6 +117,7 @@ export function createTrustlessWorkClient(): TrustlessWorkClient {
         contractId,
         disputeResolver: signer.publicKey(),
         distributions,
+        asset,
         ...(escrowType === "multi-release" ? { milestoneIndex } : {}),
       };
 
