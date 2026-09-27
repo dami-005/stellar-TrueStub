@@ -17,6 +17,12 @@ export class HasuraService {
    * Trustless Work retries the delivery instead of the update being lost. The
    * thrown error is generic so admin credentials and remote error payloads
    * stay out of logs and responses.
+   *
+   * Replay/dedup: the update is naturally idempotent — re-applying the same
+   * `status` for the same `contract_id` converges to the same end state and
+   * reports `affected_rows: 0` when the row already holds that status. Callers
+   * use that signal to skip duplicate side effects (e.g. notifications) for a
+   * replayed delivery.
    */
   static async updateEscrowStatus(
     contractId: string,
@@ -25,7 +31,7 @@ export class HasuraService {
     const query = `
       mutation UpdateEscrowStatus($contractId: String!, $status: String!) {
         update_escrow_transactions(
-          where: { contract_id: { _eq: $contractId } }
+          where: { contract_id: { _eq: $contractId }, status: { _neq: $status } }
           _set: { status: $status, updated_at: "now()" }
         ) {
           affected_rows
@@ -45,6 +51,15 @@ export class HasuraService {
     return { affected_rows: data.update_escrow_transactions?.affected_rows ?? 0 };
   }
 
+  /**
+   * Inserts a notification, deduplicating replayed webhook deliveries.
+   *
+   * A replayed signed payload would otherwise send the same notification
+   * twice. The insert is guarded by a `notifications` uniqueness constraint on
+   * `(user_id, type, title, message)`; on conflict the existing row is returned
+   * instead of a duplicate being created, so the same event converges to a
+   * single notification.
+   */
   static async insertNotification(notification: {
     userId: string;
     type: string;
@@ -60,6 +75,10 @@ export class HasuraService {
             title: $title
             message: $message
             read: false
+          }
+          on_conflict: {
+            constraint: notifications_user_id_type_title_message_key
+            update_columns: []
           }
         ) {
           id
