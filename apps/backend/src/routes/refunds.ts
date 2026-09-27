@@ -14,6 +14,12 @@
  * REFUND_ID_REUSED_ACROSS_ESCROWS instead of being silently cross-applied to
  * the wrong escrow's dispute.
  *
+ * The `amount` is validated locally against the escrow's actual disputed
+ * balance before the on-chain call is attempted (issue #316). A mismatched
+ * amount is rejected with 400 REFUND_AMOUNT_MISMATCH and never reaches
+ * Trustless Work, so we fail fast instead of relying solely on the
+ * downstream API/contract to catch it.
+ *
  * Request body:
  *   {
  *     "refundId":       "string — unique idempotency key",
@@ -27,6 +33,7 @@
  *   }
  *
  * Responses: 201 with `claim.status = "submitted"` and `claim.txHash`;
+ * 400 REFUND_AMOUNT_MISMATCH when `amount` doesn't equal the disputed balance;
  * 409 REFUND_ALREADY_CLAIMED for a second identical call against the same
  * escrow; 409 REFUND_ID_REUSED_ACROSS_ESCROWS when the same `refundId` is
  * reused against a different escrow;
@@ -56,6 +63,16 @@ const claimSchema = z.object({
   milestoneIndex: z.string().optional(),
 });
 
+/**
+ * Normalize an amount to a comparable numeric value.
+ * Returns null when the value can't be parsed as a finite number.
+ */
+function normalizeAmount(value: string | number | undefined | null): number | null {
+  if (value === undefined || value === null) return null;
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 // POST /api/refunds/claim
 refundsRouter.post("/claim", async (req: Request, res: Response, next: NextFunction) => {
   const parsed = claimSchema.safeParse(req.body);
@@ -70,6 +87,31 @@ refundsRouter.post("/claim", async (req: Request, res: Response, next: NextFunct
   }
 
   try {
+    // Local pre-submission guard (issue #316): compare the requested amount
+    // against the escrow's actual disputed balance before attempting the
+    // on-chain call. Fail fast with 400 instead of relying on Trustless Work
+    // / the contract to reject a mismatched amount downstream.
+    const disputedBalance = await refundService.getDisputedBalance(parsed.data.escrowId);
+    if (disputedBalance !== null) {
+      const requested = normalizeAmount(parsed.data.amount);
+      if (requested === null) {
+        return res.status(400).json({
+          error: {
+            code: "REFUND_AMOUNT_MISMATCH",
+            message: "amount is required and must equal the disputed escrow balance",
+          },
+        });
+      }
+      if (requested !== disputedBalance) {
+        return res.status(400).json({
+          error: {
+            code: "REFUND_AMOUNT_MISMATCH",
+            message: `amount (${requested}) does not equal the disputed escrow balance (${disputedBalance})`,
+          },
+        });
+      }
+    }
+
     const record = await refundService.claimRefund(parsed.data);
     return res.status(201).json({ success: true, claim: record });
   } catch (err) {
