@@ -19,6 +19,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import * as Sentry from "@sentry/node";
 import { ownershipTransferService } from "../services/ownership-transfer.service";
+import { changelogService } from "../services/changelog.service";
 import { AppError } from "../middleware/errorHandler";
 
 export const transfersRouter = Router();
@@ -68,6 +69,18 @@ transfersRouter.post("/initiate", async (req: Request, res: Response) => {
 transfersRouter.post("/:transferId/accept", async (req: Request, res: Response) => {
   try {
     const transfer = await ownershipTransferService.acceptTransfer(req.params.transferId);
+    await changelogService.record({
+      entityType: "transfer",
+      entityId: transfer.id,
+      action: "transfer.completed",
+      actor: transfer.toOwner,
+      metadata: {
+        escrowId: transfer.escrowId,
+        fromOwner: transfer.fromOwner,
+        toOwner: transfer.toOwner,
+        status: transfer.status,
+      },
+    });
     return res.json({ transfer });
   } catch (err) {
     if (err instanceof AppError) {

@@ -60,6 +60,20 @@ export const CHANGELOG_ERROR_CODES = {
   DUPLICATE_ENTRY: "CHANGELOG_DUPLICATE_ENTRY",
 } as const;
 
+/**
+ * Canonical action names for money-movement audit entries (issue #324).
+ *
+ * Refund and ownership-transfer routes must record these actions so every
+ * completed refund / transfer has a permanent, immutable changelog entry.
+ */
+export const CHANGELOG_ACTIONS = {
+  REFUND_SUBMITTED: "refund_submitted",
+  REFUND_COMPLETED: "refund_completed",
+  TRANSFER_COMPLETED: "ownership_transferred",
+} as const;
+
+export type ChangelogAction = (typeof CHANGELOG_ACTIONS)[keyof typeof CHANGELOG_ACTIONS];
+
 // ── Storage interface ──────────────────────────────────────────────────────
 
 export interface ChangelogStore {
@@ -168,6 +182,38 @@ export class ChangelogService {
     await this.store.set(entryId, entry);
     this.emit({ type: "ENTRY_APPENDED", entry, occurredAt: entry.timestamp });
     return entry;
+  }
+
+  /**
+   * Records a money-movement audit entry (refund / transfer) idempotently.
+   *
+   * Refund and transfer routes call this so every completed refund and
+   * ownership transfer has a corresponding permanent changelog entry
+   * (issue #324).  The `entryId` is derived from the action + resource so a
+   * retried request cannot create duplicate audit lines; if the entry already
+   * exists the existing record is returned unchanged (write-once preserved).
+   */
+  async recordMoneyMovement(payload: {
+    action: ChangelogAction;
+    actorId: string;
+    resourceId: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<ChangelogEntry> {
+    const { action, actorId, resourceId } = payload;
+    const entryId = `${action}:${resourceId}`;
+
+    const existing = await this.store.get(entryId);
+    if (existing) {
+      return existing;
+    }
+
+    return this.appendEntry({
+      entryId,
+      action,
+      actorId,
+      resourceId,
+      metadata: payload.metadata,
+    });
   }
 
   /**

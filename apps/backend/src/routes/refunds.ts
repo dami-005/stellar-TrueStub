@@ -33,6 +33,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import * as Sentry from "@sentry/node";
 import { refundService } from "../services/refund.service";
+import { changelogService } from "../services/changelog.service";
 import { AppError } from "../middleware/errorHandler";
 
 export const refundsRouter = Router();
@@ -80,6 +81,44 @@ refundsRouter.post("/claim", async (req: Request, res: Response, next: NextFunct
 
   try {
     const record = await refundService.claimRefund(parsed.data);
+
+    // Permanent audit trail: record the refund submission in the changelog so
+    // every refund attempt that reached the chain has an immutable entry.
+    await changelogService.append({
+      entityType: "refund",
+      entityId: refundId,
+      action: "refund.submitted",
+      actor: parsed.data.claimedBy ?? null,
+      metadata: {
+        escrowId,
+        escrowType: escrowType ?? "single-release",
+        milestoneIndex: milestoneIndex ?? null,
+        amount: parsed.data.amount ?? null,
+        currency: parsed.data.currency ?? null,
+        refundTo: parsed.data.refundTo,
+        txHash: record.txHash ?? null,
+        status: record.status,
+      },
+    });
+
+    // A refund that is already completed on-chain gets a second, distinct
+    // changelog entry so completion is independently auditable.
+    if (record.status === "completed") {
+      await changelogService.append({
+        entityType: "refund",
+        entityId: refundId,
+        action: "refund.completed",
+        actor: parsed.data.claimedBy ?? null,
+        metadata: {
+          escrowId,
+          amount: parsed.data.amount ?? null,
+          currency: parsed.data.currency ?? null,
+          refundTo: parsed.data.refundTo,
+          txHash: record.txHash ?? null,
+        },
+      });
+    }
+
     return res.status(201).json({ success: true, claim: record });
   } catch (err) {
     if (err instanceof AppError && err.code === "REFUND_ALREADY_CLAIMED") {
