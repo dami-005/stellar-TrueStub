@@ -17,6 +17,7 @@
 
 import { Router, Request, Response } from "express";
 import { z } from "zod";
+import * as Sentry from "@sentry/node";
 import { ownershipTransferService } from "../services/ownership-transfer.service";
 import { AppError } from "../middleware/errorHandler";
 
@@ -49,6 +50,16 @@ transfersRouter.post("/initiate", async (req: Request, res: Response) => {
     if (err instanceof AppError) {
       return res.status(err.statusCode).json({ error: { code: err.code, message: err.message } });
     }
+    Sentry.setTag("route", "transfers.initiate");
+    Sentry.setTag("transferId", parsed.data.transferId);
+    Sentry.setTag("escrowId", parsed.data.escrowId);
+    Sentry.setContext("transfer", {
+      transferId: parsed.data.transferId,
+      escrowId: parsed.data.escrowId,
+      fromOwner: parsed.data.fromOwner,
+      toOwner: parsed.data.toOwner,
+      failureStep: "initiateTransfer",
+    });
     throw err;
   }
 });
@@ -62,6 +73,12 @@ transfersRouter.post("/:transferId/accept", async (req: Request, res: Response) 
     if (err instanceof AppError) {
       return res.status(err.statusCode).json({ error: { code: err.code, message: err.message } });
     }
+    Sentry.setTag("route", "transfers.accept");
+    Sentry.setTag("transferId", req.params.transferId);
+    Sentry.setContext("transfer", {
+      transferId: req.params.transferId,
+      failureStep: "acceptTransfer",
+    });
     throw err;
   }
 });
@@ -75,6 +92,12 @@ transfersRouter.post("/:transferId/cancel", async (req: Request, res: Response) 
     if (err instanceof AppError) {
       return res.status(err.statusCode).json({ error: { code: err.code, message: err.message } });
     }
+    Sentry.setTag("route", "transfers.cancel");
+    Sentry.setTag("transferId", req.params.transferId);
+    Sentry.setContext("transfer", {
+      transferId: req.params.transferId,
+      failureStep: "cancelTransfer",
+    });
     throw err;
   }
 });
