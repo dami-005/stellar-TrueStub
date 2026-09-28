@@ -33,7 +33,9 @@
 
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
+import * as Sentry from "@sentry/node";
 import { refundService } from "../services/refund.service";
+import { changelogService } from "../services/changelog.service";
 import { AppError } from "../middleware/errorHandler";
 
 export const refundsRouter = Router();
@@ -93,12 +95,22 @@ refundsRouter.post("/claim", async (req: Request, res: Response, next: NextFunct
   } catch (err) {
     if (err instanceof AppError && err.code === "REFUND_ALREADY_CLAIMED") {
       // Fetch original claim so the caller can get an idempotent response
-      const existing = await refundService.getClaimStatus(parsed.data.refundId);
+      const existing = await refundService.getClaimStatus(refundId);
       return res.status(409).json({
         error: { code: err.code, message: err.message },
         claim: existing ?? null,
       });
     }
+
+    // Record the specific failure step so the Sentry event pinpoints where the
+    // refund flow broke (validation already passed at this point).
+    Sentry.setContext("refund_failure", {
+      step: "claimRefund",
+      code: err instanceof AppError ? err.code : "UNKNOWN",
+      message: err instanceof Error ? err.message : String(err),
+    });
+    Sentry.captureException(err);
+
     // Express 4 doesn't catch async throws — hand off to the global errorHandler
     // (maps REFUND_EXECUTION_FAILED → 502, REFUND_EXECUTION_UNAVAILABLE → 503).
     return next(err);
@@ -113,6 +125,10 @@ refundsRouter.get("/claim/:refundId", async (req: Request, res: Response) => {
       error: { code: "REFUND_INVALID_PAYLOAD", message: "refundId param is required" },
     });
   }
+
+  Sentry.setTag("route", "refunds.claim.status");
+  Sentry.setTag("refundId", refundId);
+  Sentry.setContext("refund", { refundId });
 
   const record = await refundService.getClaimStatus(refundId);
   if (!record) {
