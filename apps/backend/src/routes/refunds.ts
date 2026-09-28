@@ -16,9 +16,11 @@
  *     "amount":         "string | number — full disputed escrow balance",
  *     "escrowType":     "single-release | multi-release — default single-release",
  *     "milestoneIndex": "string — required for multi-release",
- *     "currency":       "string — optional, e.g. USDC",
- *     "claimedBy":      "string — optional, caller user-id"
+ *     "currency":       "string — optional, e.g. USDC"
  *   }
+ *
+ * The caller identity (`claimedBy`) is derived from the verified session
+ * (issue #303) — it is never read from the request body.
  *
  * Responses: 201 with `claim.status = "submitted"` and `claim.txHash`;
  * 502 REFUND_EXECUTION_FAILED if the chain rejected it;
@@ -41,11 +43,26 @@ const claimSchema = z.object({
   escrowId: z.string().min(1, "escrowId is required"),
   amount: z.union([z.string(), z.number()]).optional(),
   currency: z.string().optional(),
-  claimedBy: z.string().optional(),
   refundTo: z.string().regex(/^[GC][A-Z2-7]{55}$/, "refundTo must be a Stellar address"),
   escrowType: z.enum(["single-release", "multi-release"]).optional(),
   milestoneIndex: z.string().optional(),
 });
+
+/**
+ * Derive the caller's verified identity from the authenticated session.
+ *
+ * The session is populated by the auth middleware (e.g. `req.user` /
+ * `req.auth`). We deliberately do NOT fall back to any client-supplied
+ * value — an unauthenticated request must not be able to assert who it is
+ * for an authorization-relevant field (issue #303).
+ */
+function getVerifiedUserId(req: Request): string | undefined {
+  const auth = (req as Request & {
+    user?: { id?: string; uid?: string };
+    auth?: { userId?: string; uid?: string };
+  });
+  return auth.user?.id ?? auth.user?.uid ?? auth.auth?.userId ?? auth.auth?.uid;
+}
 
 // POST /api/refunds/claim
 refundsRouter.post("/claim", async (req: Request, res: Response, next: NextFunction) => {
@@ -60,8 +77,18 @@ refundsRouter.post("/claim", async (req: Request, res: Response, next: NextFunct
     });
   }
 
+  const claimedBy = getVerifiedUserId(req);
+  if (!claimedBy) {
+    return res.status(401).json({
+      error: {
+        code: "REFUND_UNAUTHENTICATED",
+        message: "Authentication required to claim a refund",
+      },
+    });
+  }
+
   try {
-    const record = await refundService.claimRefund(parsed.data);
+    const record = await refundService.claimRefund({ ...parsed.data, claimedBy });
     return res.status(201).json({ success: true, claim: record });
   } catch (err) {
     if (err instanceof AppError && err.code === "REFUND_ALREADY_CLAIMED") {

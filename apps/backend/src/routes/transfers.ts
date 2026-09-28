@@ -2,7 +2,7 @@
  * Ownership Transfer routes — issue #154
  *
  * POST /api/transfers/initiate
- *   Body: { transferId, escrowId, fromOwner, toOwner }
+ *   Body: { transferId, escrowId, toOwner }
  *   → 201 { transfer }
  *
  * POST /api/transfers/:transferId/accept
@@ -25,12 +25,27 @@ export const transfersRouter = Router();
 const initiateSchema = z.object({
   transferId: z.string().min(1, "transferId is required"),
   escrowId: z.string().min(1, "escrowId is required"),
-  fromOwner: z.string().min(1, "fromOwner is required"),
   toOwner: z.string().min(1, "toOwner is required"),
 });
 
+/**
+ * Derive the caller's verified identity from the authenticated session.
+ * Never trust a client-supplied `fromOwner`/`userId` for authorization.
+ */
+function getVerifiedUserId(req: Request): string | null {
+  const user = (req as Request & { user?: { id?: string; uid?: string } }).user;
+  return user?.id ?? user?.uid ?? null;
+}
+
 // POST /api/transfers/initiate
 transfersRouter.post("/initiate", async (req: Request, res: Response) => {
+  const fromOwner = getVerifiedUserId(req);
+  if (!fromOwner) {
+    return res.status(401).json({
+      error: { code: "TRANSFER_UNAUTHENTICATED", message: "Authentication required" },
+    });
+  }
+
   const parsed = initiateSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({
@@ -43,7 +58,10 @@ transfersRouter.post("/initiate", async (req: Request, res: Response) => {
   }
 
   try {
-    const transfer = await ownershipTransferService.initiateTransfer(parsed.data);
+    const transfer = await ownershipTransferService.initiateTransfer({
+      ...parsed.data,
+      fromOwner,
+    });
     return res.status(201).json({ transfer });
   } catch (err) {
     if (err instanceof AppError) {
@@ -55,8 +73,15 @@ transfersRouter.post("/initiate", async (req: Request, res: Response) => {
 
 // POST /api/transfers/:transferId/accept
 transfersRouter.post("/:transferId/accept", async (req: Request, res: Response) => {
+  const actorId = getVerifiedUserId(req);
+  if (!actorId) {
+    return res.status(401).json({
+      error: { code: "TRANSFER_UNAUTHENTICATED", message: "Authentication required" },
+    });
+  }
+
   try {
-    const transfer = await ownershipTransferService.acceptTransfer(req.params.transferId);
+    const transfer = await ownershipTransferService.acceptTransfer(req.params.transferId, actorId);
     return res.json({ transfer });
   } catch (err) {
     if (err instanceof AppError) {
@@ -68,8 +93,15 @@ transfersRouter.post("/:transferId/accept", async (req: Request, res: Response) 
 
 // POST /api/transfers/:transferId/cancel
 transfersRouter.post("/:transferId/cancel", async (req: Request, res: Response) => {
+  const actorId = getVerifiedUserId(req);
+  if (!actorId) {
+    return res.status(401).json({
+      error: { code: "TRANSFER_UNAUTHENTICATED", message: "Authentication required" },
+    });
+  }
+
   try {
-    const transfer = await ownershipTransferService.cancelTransfer(req.params.transferId);
+    const transfer = await ownershipTransferService.cancelTransfer(req.params.transferId, actorId);
     return res.json({ transfer });
   } catch (err) {
     if (err instanceof AppError) {
