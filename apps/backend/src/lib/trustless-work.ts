@@ -29,6 +29,13 @@ export interface ResolveDisputeInput {
   contractId: string;
   escrowType: EscrowType;
   distributions: Distribution[];
+  /**
+   * The escrow's funding asset (e.g. USDC, XLM, EURC). Trustless Work refunds
+   * in the escrow's original token, so the caller must pass the escrow's actual
+   * asset rather than relying on a single default left over from before
+   * multi-asset support existed (#322).
+   */
+  asset: string;
   /** Required for multi-release escrows. */
   milestoneIndex?: string;
 }
@@ -39,9 +46,25 @@ export interface SubmittedTransaction {
   message: string;
 }
 
+/**
+ * Live escrow state as reported by Trustless Work. Only the fields the
+ * reconciliation job (#325) needs to compare against Hasura are typed here.
+ */
+export interface EscrowLiveState {
+  contractId: string;
+  /** Trustless Work's authoritative status for the escrow. */
+  status: string;
+}
+
 export interface TrustlessWorkClient {
   /** Resolves a dispute on-chain, moving escrowed funds per `distributions`. */
   resolveDispute(input: ResolveDisputeInput): Promise<SubmittedTransaction>;
+  /**
+   * Reads an escrow's live state from Trustless Work. Used by the
+   * reconciliation job (#325) to detect drift between Hasura's
+   * `escrow_transactions.status` and Trustless Work's authoritative state.
+   */
+  getEscrow(contractId: string): Promise<EscrowLiveState>;
 }
 
 export class TrustlessWorkError extends Error {
@@ -101,8 +124,24 @@ export function createTrustlessWorkClient(): TrustlessWorkClient {
     return json;
   }
 
+  async function get<T>(apiUrl: string, apiKey: string, path: string): Promise<T> {
+    const response = await fetch(`${apiUrl}${path}`, {
+      method: "GET",
+      headers: { "x-api-key": apiKey },
+    });
+
+    const json = (await response.json().catch(() => ({}))) as { message?: string } & T;
+    if (!response.ok) {
+      throw new TrustlessWorkError(
+        `Trustless Work ${path} failed: ${json.message ?? response.statusText}`,
+        response.status,
+      );
+    }
+    return json;
+  }
+
   return {
-    async resolveDispute({ contractId, escrowType, distributions, milestoneIndex }) {
+    async resolveDispute({ contractId, escrowType, distributions, asset, milestoneIndex }) {
       const { apiUrl, apiKey, signer, networkPassphrase } = requireTrustlessWorkConfig();
 
       const endpoint = escrowType === "single-release" ? "resolve-dispute" : "resolve-milestone-dispute";
@@ -110,6 +149,7 @@ export function createTrustlessWorkClient(): TrustlessWorkClient {
         contractId,
         disputeResolver: signer.publicKey(),
         distributions,
+        asset,
         ...(escrowType === "multi-release" ? { milestoneIndex } : {}),
       };
 
@@ -137,6 +177,22 @@ export function createTrustlessWorkClient(): TrustlessWorkClient {
       }
 
       return { txHash, status: result.status, message: result.message ?? "" };
+    },
+
+    async getEscrow(contractId) {
+      const { apiUrl, apiKey } = requireTrustlessWorkConfig();
+
+      const json = await get<{ status?: string; escrow?: { status?: string } }>(
+        apiUrl,
+        apiKey,
+        `/escrow/${encodeURIComponent(contractId)}`,
+      );
+      const status = json.status ?? json.escrow?.status;
+      if (!status) {
+        throw new TrustlessWorkError(`Trustless Work /escrow/${contractId} returned no status`);
+      }
+
+      return { contractId, status };
     },
   };
 }
