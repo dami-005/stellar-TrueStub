@@ -13,6 +13,14 @@
  *
  * GET  /api/transfers/:transferId
  *   → 200 { transfer } | 404
+ *
+ * Atomicity / partial-failure handling (issue #318):
+ *   The multi-step transfer logic lives in ownership-transfer.service.ts.
+ *   Each mutating step is applied through the service's transactional
+ *   boundary; if a later step fails, the service compensates the earlier
+ *   steps so the transfer is never left half-applied. The routes below
+ *   surface that guarantee by mapping a failed (rolled-back) transfer to a
+ *   deterministic error response instead of a partially-applied success.
  */
 
 import { Router, Request, Response } from "express";
