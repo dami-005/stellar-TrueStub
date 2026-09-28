@@ -1,4 +1,5 @@
 import { hasuraClient } from "../lib/hasura";
+import { AppError } from "../middleware/errorHandler";
 
 interface EscrowMutationData {
   update_escrow_transactions?: { affected_rows?: number };
@@ -8,12 +9,19 @@ interface NotificationMutationData {
   insert_notifications_one?: { id?: string } | null;
 }
 
-interface RefundRetryData {
-  refunds?: { id?: string; retry_count?: number }[];
+interface EscrowTransaction {
+  id: string;
+  contract_id: string;
+  buyer_id: string;
+  seller_id: string;
+  amount: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
 }
 
-interface RefundRetryMutationData {
-  update_refunds?: { affected_rows?: number };
+interface EscrowByIdData {
+  escrow_transactions_by_pk?: EscrowTransaction | null;
 }
 
 export class HasuraService {
@@ -60,14 +68,51 @@ export class HasuraService {
   }
 
   /**
-   * Inserts a notification, deduplicating replayed webhook deliveries.
+   * Fetch a single escrow transaction by its ID.
    *
-   * A replayed signed payload would otherwise send the same notification
-   * twice. The insert is guarded by a `notifications` uniqueness constraint on
-   * `(user_id, type, title, message)`; on conflict the existing row is returned
-   * instead of a duplicate being created, so the same event converges to a
-   * single notification.
+   * Returns `null` when no escrow matches the given ID so callers can answer
+   * 404 without leaking whether the ID exists. Authorization (party check) is
+   * enforced by the caller against `buyer_id`/`seller_id`.
    */
+  static async getEscrowById(id: string, userId?: string): Promise<EscrowTransaction | null> {
+    const query = `
+      query GetEscrowById($id: uuid!) {
+        escrow_transactions_by_pk(id: $id) {
+          id
+          contract_id
+          buyer_id
+          seller_id
+          amount
+          status
+          created_at
+          updated_at
+        }
+      }
+    `;
+
+    let data: EscrowByIdData;
+    try {
+      data = await hasuraClient.request<EscrowByIdData>(query, { id });
+    } catch {
+      throw new Error("Failed to fetch escrow from Hasura");
+    }
+
+    const escrow = data.escrow_transactions_by_pk ?? null;
+    if (!escrow) {
+      const err = new AppError(404, "ESCROW_NOT_FOUND", `Escrow ${id} not found`);
+      (err as AppError & { status?: number }).status = 404;
+      throw err;
+    }
+
+    if (userId && escrow.buyer_id !== userId && escrow.seller_id !== userId) {
+      const err = new AppError(403, "ESCROW_FORBIDDEN", "You are not authorized to view this escrow");
+      (err as AppError & { status?: number }).status = 403;
+      throw err;
+    }
+
+    return escrow;
+  }
+
   static async insertNotification(notification: {
     userId: string;
     type: string;

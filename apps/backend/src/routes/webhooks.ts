@@ -111,14 +111,24 @@ function verifySignature(rawBody: Buffer, signature: string, secret: string): bo
  * gives the on-call alert time to repair the write path before that happens.
  * Do not attach the request body: it can contain recipient PII.
  */
-function captureDeliveryFailure(err: unknown, contractId?: string): void {
+function captureDeliveryFailure(
+  err: unknown,
+  contractId?: string,
+  step?: string,
+  engagementId?: string
+): void {
   Sentry.captureException(err, {
     tags: {
       alert: "webhook.delivery_failure",
       webhook: "escrow-status",
       retryable: "true",
+      ...(step ? { step } : {}),
+      ...(contractId ? { contractId } : {}),
+      ...(engagementId ? { engagementId } : {}),
     },
-    ...(contractId ? { extra: { contractId } } : {}),
+    ...(contractId || engagementId
+      ? { extra: { ...(contractId ? { contractId } : {}), ...(engagementId ? { engagementId } : {}) } }
+      : {}),
   });
 }
 
@@ -126,7 +136,11 @@ webhookRouter.post("/escrow-status", async (req: Request, res: Response) => {
   const secret = env.TRUSTLESS_WORK_WEBHOOK_SECRET;
   if (!secret) {
     logger.error("[webhook:escrow-status] TRUSTLESS_WORK_WEBHOOK_SECRET is not configured");
-    captureDeliveryFailure(new Error("TRUSTLESS_WORK_WEBHOOK_SECRET is not configured"));
+    captureDeliveryFailure(
+      new Error("TRUSTLESS_WORK_WEBHOOK_SECRET is not configured"),
+      undefined,
+      "config.secret_missing"
+    );
     return res.status(500).json({ error: "Webhook secret is not configured" });
   }
 
@@ -199,6 +213,18 @@ webhookRouter.post("/escrow-status", async (req: Request, res: Response) => {
   const resolvedEngagementId =
     typeof engagementId === "string" && engagementId ? engagementId : contractId;
 
+  // Enrich every Sentry event from this request with the business identifiers
+  // so a failure is traceable to the specific escrow/contract (#323).
+  Sentry.setTag("webhook", "escrow-status");
+  Sentry.setTag("contractId", contractId);
+  Sentry.setTag("engagementId", resolvedEngagementId);
+  Sentry.setContext("escrow", {
+    contractId,
+    engagementId: resolvedEngagementId,
+    status,
+    normalizedStatus,
+  });
+
   let rowsUpdated: number;
   try {
     ({ affected_rows: rowsUpdated } = await HasuraService.updateEscrowStatus(
@@ -208,7 +234,7 @@ webhookRouter.post("/escrow-status", async (req: Request, res: Response) => {
   } catch (err) {
     // Non-2xx so Trustless Work retries the delivery.
     logger.error({ err, contractId }, "[webhook:escrow-status] Failed to update escrow status");
-    captureDeliveryFailure(err, contractId);
+    captureDeliveryFailure(err, contractId, "escrow_status.update", resolvedEngagementId);
     return res.status(500).json({ error: "Failed to sync escrow status" });
   }
 
@@ -236,6 +262,7 @@ webhookRouter.post("/escrow-status", async (req: Request, res: Response) => {
     });
   } catch (err) {
     logger.error({ err, contractId }, "[webhook:escrow-status] Escrow status notification failed");
+    captureDeliveryFailure(err, contractId, "escrow_status.notify", resolvedEngagementId);
   }
 
   logger.info(
