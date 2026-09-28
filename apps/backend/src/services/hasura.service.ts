@@ -8,8 +8,17 @@ interface NotificationMutationData {
   insert_notifications_one?: { id?: string } | null;
 }
 
-interface OwnershipTransferMutationData {
-  update_ownership_transfers?: { affected_rows?: number };
+interface EscrowByIdData {
+  escrow_transactions?: Array<{
+    id: string;
+    contract_id: string;
+    buyer_id: string;
+    seller_id: string;
+    amount: number;
+    status: string;
+    created_at: string;
+    updated_at: string;
+  }>;
 }
 
 export class HasuraService {
@@ -50,41 +59,35 @@ export class HasuraService {
   }
 
   /**
-   * Persists the ownership record for a transfer. This is the database half of
-   * the atomic ownership transfer (issue #154): the on-chain action and this
-   * write are coordinated by `ownership-transfer.service.ts`, which compensates
-   * (rolls back) the on-chain side if this write fails, and vice versa.
+   * Fetch a single escrow transaction by its ID.
    *
-   * Failures are surfaced (not swallowed) so the caller can run its
-   * compensation path instead of leaving a half-applied transfer behind.
+   * Returns `null` when no escrow matches the given ID so callers can answer
+   * 404 without leaking whether the ID exists. Authorization (party check) is
+   * enforced by the caller against `buyer_id`/`seller_id`.
    */
-  static async updateOwnershipTransfer(
-    transferId: string,
-    ownerId: string
-  ): Promise<{ affected_rows: number }> {
+  static async getEscrowById(id: string): Promise<EscrowByIdData["escrow_transactions"] extends Array<infer T> ? T | null : never> {
     const query = `
-      mutation UpdateOwnershipTransfer($transferId: uuid!, $ownerId: String!) {
-        update_ownership_transfers(
-          where: { id: { _eq: $transferId } }
-          _set: { owner_id: $ownerId, updated_at: "now()" }
-        ) {
-          affected_rows
+      query GetEscrowById($id: uuid!) {
+        escrow_transactions(where: { id: { _eq: $id } }, limit: 1) {
+          id
+          contract_id
+          buyer_id
+          seller_id
+          amount
+          status
+          created_at
+          updated_at
         }
       }
     `;
 
-    let data: OwnershipTransferMutationData;
+    let data: EscrowByIdData;
     try {
-      data = await hasuraClient.request<OwnershipTransferMutationData>(query, {
-        transferId,
-        ownerId,
-      });
+      data = await hasuraClient.request<EscrowByIdData>(query, { id });
     } catch {
-      throw new Error("Failed to update ownership transfer in Hasura");
+      throw new Error("Failed to fetch escrow from Hasura");
     }
-    return {
-      affected_rows: data.update_ownership_transfers?.affected_rows ?? 0,
-    };
+    return data.escrow_transactions?.[0] ?? null;
   }
 
   static async insertNotification(notification: {
