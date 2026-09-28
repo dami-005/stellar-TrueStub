@@ -93,11 +93,14 @@ watchlistRouter.delete("/:listingId", (req, res) => {
  * watch-time and notifies every watcher whose saved price differs. Intended to
  * be invoked by the backend scheduler whenever a listing's price is updated.
  */
-watchlistRouter.post("/price-check", (req, res) => {
+watchlistRouter.post("/price-check", async (req, res) => {
   const parsed = priceCheckSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid price check payload", details: parsed.error.flatten() });
   }
-  const notifications = listingAlertService.checkPriceChange(parsed.data.listingId, parsed.data.currentPrice);
+  const notifications = await listingAlertService.checkPriceChange(
+    parsed.data.listingId,
+    parsed.data.currentPrice
+  );
   return res.json({ notifications });
 });

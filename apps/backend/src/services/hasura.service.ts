@@ -1,4 +1,5 @@
 import { hasuraClient } from "../lib/hasura";
+import { AppError } from "../middleware/errorHandler";
 
 interface EscrowMutationData {
   update_escrow_transactions?: { affected_rows?: number };
@@ -8,17 +9,19 @@ interface NotificationMutationData {
   insert_notifications_one?: { id?: string } | null;
 }
 
+interface EscrowTransaction {
+  id: string;
+  contract_id: string;
+  buyer_id: string;
+  seller_id: string;
+  amount: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
 interface EscrowByIdData {
-  escrow_transactions?: Array<{
-    id: string;
-    contract_id: string;
-    buyer_id: string;
-    seller_id: string;
-    amount: number;
-    status: string;
-    created_at: string;
-    updated_at: string;
-  }>;
+  escrow_transactions_by_pk?: EscrowTransaction | null;
 }
 
 export class HasuraService {
@@ -65,10 +68,10 @@ export class HasuraService {
    * 404 without leaking whether the ID exists. Authorization (party check) is
    * enforced by the caller against `buyer_id`/`seller_id`.
    */
-  static async getEscrowById(id: string): Promise<EscrowByIdData["escrow_transactions"] extends Array<infer T> ? T | null : never> {
+  static async getEscrowById(id: string, userId?: string): Promise<EscrowTransaction | null> {
     const query = `
       query GetEscrowById($id: uuid!) {
-        escrow_transactions(where: { id: { _eq: $id } }, limit: 1) {
+        escrow_transactions_by_pk(id: $id) {
           id
           contract_id
           buyer_id
@@ -87,7 +90,21 @@ export class HasuraService {
     } catch {
       throw new Error("Failed to fetch escrow from Hasura");
     }
-    return data.escrow_transactions?.[0] ?? null;
+
+    const escrow = data.escrow_transactions_by_pk ?? null;
+    if (!escrow) {
+      const err = new AppError(404, "ESCROW_NOT_FOUND", `Escrow ${id} not found`);
+      (err as AppError & { status?: number }).status = 404;
+      throw err;
+    }
+
+    if (userId && escrow.buyer_id !== userId && escrow.seller_id !== userId) {
+      const err = new AppError(403, "ESCROW_FORBIDDEN", "You are not authorized to view this escrow");
+      (err as AppError & { status?: number }).status = 403;
+      throw err;
+    }
+
+    return escrow;
   }
 
   static async insertNotification(notification: {

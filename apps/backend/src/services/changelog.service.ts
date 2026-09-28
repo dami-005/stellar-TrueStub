@@ -247,10 +247,24 @@ export class ChangelogService {
   }
 
   /**
-   * Returns all entries for a given resource, sorted chronologically.
+   * Returns entries for a given resource in chronological order.
+   *
+   * When `options` are supplied, the method behaves as a paginated query and
+   * returns only the selected slice. The legacy no-options call keeps the
+   * original "return all entries" contract for route consumers.
    */
-  async listEntries(resourceId: string): Promise<ChangelogEntry[]> {
-    return this.store.listByResource(resourceId);
+  async listEntries(
+    resourceId: string,
+    options: ChangelogPaginationOptions = {}
+  ): Promise<ChangelogEntry[]> {
+    const all = await this.store.listByResource(resourceId);
+    if (Object.keys(options).length === 0) {
+      return all;
+    }
+
+    const limit = this.normalizeLimit(options.limit);
+    const offset = this.normalizeOffset(options.offset);
+    return all.slice(offset, offset + limit);
   }
 
   /**

@@ -202,6 +202,31 @@ export class ListingAlertService {
     return notified;
   }
 
+  /**
+   * Simple scheduler callback for a listing price-check job.
+   * Notifies all watchers whose stored baseline differs from the current price.
+   */
+  async checkPriceChange(listingId: string, currentPrice: number): Promise<string[]> {
+    const notified: string[] = [];
+
+    for (const watcher of this.watches.values()) {
+      if (watcher.listingId !== listingId || watcher.price === undefined) continue;
+      if (watcher.price === currentPrice) continue;
+
+      const direction = currentPrice < watcher.price ? "dropped" : "increased";
+      await this.deliver(
+        watcher,
+        "watchlist_price_change",
+        `💸 Price ${direction}: ${watcher.listingId}`,
+        `The price of a listing you're watching ${direction} from ${watcher.price} to ${currentPrice} USDC.`,
+        `${ListingAlertService.baseUrl()}/rent/${watcher.listingId}`
+      );
+      notified.push(watcher.userId);
+    }
+
+    return notified;
+  }
+
   private async deliver(
     target: { userId: string; email?: string; pushToken?: string },
     type: string,
