@@ -29,6 +29,7 @@ import * as Sentry from "@sentry/node";
 import { ownershipTransferService } from "../services/ownership-transfer.service";
 import { changelogService } from "../services/changelog.service";
 import { AppError } from "../middleware/errorHandler";
+import { sendCriticalAlert } from "../services/critical-alert.service";
 
 export const transfersRouter = Router();
 

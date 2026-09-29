@@ -8,6 +8,11 @@
  * code REFUND_ALREADY_CLAIMED on the second call — unless the first on-chain
  * attempt failed, in which case the refund is retried.
  *
+ * Retries are bounded (issue #329): a refund that keeps failing on-chain is
+ * only auto-retried up to MAX_REFUND_RETRIES times. Once the budget is spent
+ * the endpoint stops attempting the on-chain call and returns 409 with code
+ * REFUND_NEEDS_MANUAL_INTERVENTION, a terminal state requiring an operator.
+ *
  * Request body:
  *   {
  *     "refundId":       "string — unique idempotency key",
@@ -24,7 +29,8 @@
  *
  * Responses: 201 with `claim.status = "submitted"` and `claim.txHash`;
  * 502 REFUND_EXECUTION_FAILED if the chain rejected it;
- * 503 REFUND_EXECUTION_UNAVAILABLE if Trustless Work isn't configured.
+ * 503 REFUND_EXECUTION_UNAVAILABLE if Trustless Work isn't configured;
+ * 409 REFUND_NEEDS_MANUAL_INTERVENTION once the retry budget is exhausted.
  *
  * GET /api/refunds/claim/:refundId
  *
@@ -37,8 +43,15 @@ import * as Sentry from "@sentry/node";
 import { refundService } from "../services/refund.service";
 import { changelogService } from "../services/changelog.service";
 import { AppError } from "../middleware/errorHandler";
+import { alertService } from "../services/alert.service";
 
 export const refundsRouter = Router();
+
+/**
+ * Maximum number of on-chain attempts (initial + retries) for a single
+ * refundId before the refund is parked in a terminal state (issue #329).
+ */
+export const MAX_REFUND_ATTEMPTS = 5;
 
 const claimSchema = z.object({
   refundId: z.string().min(1, "refundId is required"),

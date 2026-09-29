@@ -86,6 +86,57 @@ export class TrustlessWorkNotConfiguredError extends Error {
   }
 }
 
+/**
+ * Raised when a refund has exhausted its bounded retry budget (#329). Callers
+ * should surface this as a terminal "needs manual intervention" state instead
+ * of attempting the on-chain call again.
+ */
+export class TrustlessWorkRetryExhaustedError extends Error {
+  constructor(
+    public readonly attempts: number,
+    public readonly maxAttempts: number,
+    public readonly lastError?: string,
+  ) {
+    super(
+      `Refund retry budget exhausted after ${attempts}/${maxAttempts} attempts; manual intervention required` +
+        (lastError ? `: ${lastError}` : ""),
+    );
+    this.name = "TrustlessWorkRetryExhaustedError";
+  }
+}
+
+/**
+ * Maximum number of on-chain attempts (initial + retries) for a single refund
+ * before the endpoint stops auto-retrying and reports a terminal state (#329).
+ * Bounds the retry-on-failure path so a permanently-failing refund cannot
+ * hammer Trustless Work's API indefinitely.
+ */
+export const MAX_REFUND_ATTEMPTS = 5;
+
+/**
+ * Base delay (ms) for exponential backoff between refund retries. The delay
+ * grows as `base * 2^(attempt-1)` and is capped at MAX_REFUND_BACKOFF_MS.
+ */
+export const REFUND_RETRY_BASE_BACKOFF_MS = 1_000;
+export const MAX_REFUND_BACKOFF_MS = 30_000;
+
+/**
+ * Returns the backoff delay (ms) to wait before the given attempt number
+ * (1-based). Attempt 1 is the initial call and has no delay.
+ */
+export function refundRetryBackoffMs(attempt: number): number {
+  if (attempt <= 1) return 0;
+  return Math.min(REFUND_RETRY_BASE_BACKOFF_MS * 2 ** (attempt - 2), MAX_REFUND_BACKOFF_MS);
+}
+
+/**
+ * Returns true when the refund has consumed its retry budget and must stop
+ * auto-retrying. `attempts` is the number of on-chain attempts already made.
+ */
+export function isRefundRetryExhausted(attempts: number): boolean {
+  return attempts >= MAX_REFUND_ATTEMPTS;
+}
+
 function requireTrustlessWorkConfig(): { apiUrl: string; apiKey: string; signer: Keypair; networkPassphrase: string } {
   const apiKey = env.TRUSTLESS_WORK_API_KEY;
   const secret = env.TRUSTLESS_WORK_DISPUTE_RESOLVER_SECRET;
